@@ -221,7 +221,10 @@ class SeldonMetrics:
 
     @staticmethod
     def _extract_tags_and_add_method(metric: _Metric, method: str) -> Dict[str, str]:
-        return {"method": method, **metric.get("tags", {})}
+        return {
+            **metric.get("tags", {}),
+            "method": method,
+        }
 
     @staticmethod
     def _update_counter_metric(

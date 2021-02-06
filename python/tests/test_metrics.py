@@ -1073,3 +1073,29 @@ def test_proto_seldon_metrics_predict_update_histogram_metrics_used_default_bins
             }
         },
     ]
+
+
+class TestSeldonMetrics:
+    @pytest.mark.parametrize(
+        "metric, method, expected",
+        [
+            (
+                {},
+                "predict",
+                {"method": "predict"},
+            ),
+            (
+                {"tags": {"foo": "bar"}},
+                "predict",
+                {"method": "predict", "foo": "bar"},
+            ),
+            (
+                # "inputtransform" method should be overwritten by "predict"
+                {"tags": {"foo": "bar", "method": "inputtransform"}},
+                "predict",
+                {"method": "predict", "foo": "bar"},
+            ),
+        ],
+    )
+    def test__extract_tags_and_add_method(self, metric, method, expected) -> None:
+        assert SeldonMetrics._extract_tags_and_add_method(metric, method) == expected
