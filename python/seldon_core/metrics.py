@@ -2,7 +2,7 @@ import json
 import logging
 import os
 from multiprocessing import Manager
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from prometheus_client import exposition
@@ -13,6 +13,7 @@ from prometheus_client.core import (
     HistogramMetricFamily,
 )
 from prometheus_client.utils import floatToGoString
+from typing_extensions import TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +36,10 @@ HISTOGRAM = "HISTOGRAM"
 _ALLOWED_METRIC_TYPES = {COUNTER, GAUGE, TIMER, HISTOGRAM}
 
 # This sets the bins spread logarithmically between 0.001 and 30
-BINS = [0] + list(np.logspace(-3, np.log10(30), 50)) + [np.inf]
+BINS = [0.0] + list(np.logspace(-3, np.log10(30), 50)) + [np.inf]
 
 
-def split_image_tag(tag: str) -> Tuple[str]:
+def split_image_tag(tag: str) -> Tuple[str, str]:
     """
     Extract image name and version from an image tag.
 
@@ -89,6 +90,14 @@ AGGREGATE_METRIC_METHOD_TAG = "aggregate"
 HEALTH_METRIC_METHOD_TAG = "health"
 
 
+class _Metric(TypedDict, total=False):
+    key: str
+    type: str
+    value: float
+    bins: List[float]
+    tags: Dict[str, str]
+
+
 class SeldonMetrics:
     """Class to manage custom metrics stored in shared memory."""
 
@@ -116,21 +125,19 @@ class SeldonMetrics:
             FEEDBACK_METRIC_METHOD_TAG,
         )
 
-    def update(self, custom_metrics: List[Dict], method: str):
+    def update(self, custom_metric: List[_Metric], method: str):
         # Read a corresponding worker's metric data with lock as Proxy objects
         # are not thread-safe, see "Thread safety of proxies" here
         # https://docs.python.org/3.7/library/multiprocessing.html#programming-guidelines
-        logger.debug("Updating metrics: {}".format(custom_metrics))
+        logger.debug("Updating metrics: {}".format(custom_metric))
         with self._lock:
             worker_data = self.data.get(self.worker_id_func(), {})
         logger.debug("Read current metrics data from shared memory")
 
-        for metric in custom_metrics:
+        for metric in custom_metric:
             metric_type = metric.get("type", "COUNTER")
 
-            tags = metric.get("tags", {})
-
-            tags["method"] = method
+            tags = self._extract_tags_and_add_method(metric, method)
 
             worker_data_key = (
                 metric_type,
@@ -139,36 +146,24 @@ class SeldonMetrics:
             )
 
             if metric_type == "COUNTER":
-                value = worker_data.get(worker_data_key, {}).get("value", 0)
-                worker_data[worker_data_key] = {
-                    "value": value + metric["value"],
-                    "tags": tags,
-                }
+                worker_data[worker_data_key] = self._update_counter_metric(
+                    metric,
+                    method=method,
+                    current=worker_data.get(worker_data_key),
+                )
+
             elif metric_type in {"HISTOGRAM", "TIMER"}:
-                bins = metric.get("bins", BINS)
-
-                current_values, current_sum = worker_data.get(worker_data_key, {}).get(
-                    "value",
-                    (np.zeros(len(bins) - 1).tolist(), 0),
+                worker_data[worker_data_key] = self._update_histogram_metric(
+                    metric,
+                    method=method,
+                    current=worker_data.get(worker_data_key),
                 )
 
-                new_value = (
-                    metric["value"] / 1000
-                    if metric_type == "TIMER"
-                    else metric["value"]
-                )
-
-                worker_data[worker_data_key] = {
-                    "value": self._update_hist(
-                        new_value, current_values, current_sum, bins
-                    ),
-                    "tags": tags,
-                }
             elif metric_type == "GAUGE":
-                worker_data[worker_data_key] = {
-                    "value": metric["value"],
-                    "tags": tags,
-                }
+                worker_data[worker_data_key] = self._update_gauge_metric(
+                    metric,
+                    method=method,
+                )
             else:
                 logger.error(f"Unkown metrics type: {metric_type}")
 
@@ -225,6 +220,37 @@ class SeldonMetrics:
         return "_".join(["-".join(i) for i in tags.items()])
 
     @staticmethod
+    def _extract_tags_and_add_method(metric: _Metric, method: str) -> Dict[str, str]:
+        return {"method": method, **metric.get("tags", {})}
+
+    @staticmethod
+    def _update_counter_metric(
+        metric: _Metric,
+        method: str,
+        current: Optional[Dict],
+    ) -> Dict:
+        """Updates a counter metric.
+
+        Args:
+            metrics: the new counter metric to add to the current data.
+            method:
+            current: current data, a dict with two keys: value and tag
+        """
+        tags = SeldonMetrics._extract_tags_and_add_method(metric, method)
+
+        if current is None:
+            return {
+                "value": metric["value"],
+                "tags": tags,
+            }
+
+        current_value = metric["value"]
+        return {
+            "value": current_value + metric["value"],
+            "tags": tags,
+        }
+
+    @staticmethod
     def _update_hist(
         x: float, vals: List[float], sumv: float, bins: List[float]
     ) -> Tuple[List[float], float]:
@@ -243,6 +269,62 @@ class SeldonMetrics:
         hist = np.histogram([x], bins)[0]
         vals = list(np.array(vals) + hist)
         return vals, sumv + x
+
+    @staticmethod
+    def _update_histogram_metric(
+        metric: _Metric,
+        method: str,
+        current: Optional[Dict],
+    ) -> Dict:
+        """Updates a histogram/timer metric.
+
+        Args:
+            metrics: the new histogram/timer metric to add to the current data.
+            method:
+            current: current data, a dict with two keys: value and tag
+        """
+        tags = SeldonMetrics._extract_tags_and_add_method(metric, method)
+
+        bins = metric.get("bins", BINS)
+
+        if current is None:
+            current_values = np.zeros(len(bins) - 1).tolist()
+            current_sum = 0
+        else:
+            current_values, current_sum = current["value"]
+
+        new_value = (
+            metric["value"] / 1000
+            if "type" in metric and metric["type"] == "TIMER"
+            else metric["value"]
+        )
+
+        return {
+            "value": SeldonMetrics._update_hist(
+                new_value,
+                current_values,
+                current_sum,
+                bins,
+            ),
+            "tags": tags,
+        }
+
+    @staticmethod
+    def _update_gauge_metric(
+        metric: _Metric,
+        method: str,
+    ) -> Dict:
+        """Updates a gauge metric.
+
+        Args:
+            metrics: the new counter metric to add to the current data.
+            method:
+        """
+        tags = SeldonMetrics._extract_tags_and_add_method(metric, method)
+        return {
+            "value": metric["value"],
+            "tags": tags,
+        }
 
     @staticmethod
     def _expose_gauge(name, value, labels_keys, labels_values):
