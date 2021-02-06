@@ -125,16 +125,16 @@ class SeldonMetrics:
             FEEDBACK_METRIC_METHOD_TAG,
         )
 
-    def update(self, custom_metric: List[_Metric], method: str):
+    def update(self, customer_metrics: List[_Metric], method: str):
         # Read a corresponding worker's metric data with lock as Proxy objects
         # are not thread-safe, see "Thread safety of proxies" here
         # https://docs.python.org/3.7/library/multiprocessing.html#programming-guidelines
-        logger.debug("Updating metrics: {}".format(custom_metric))
+        logger.debug("Updating metrics: {}".format(customer_metrics))
         with self._lock:
             worker_data = self.data.get(self.worker_id_func(), {})
         logger.debug("Read current metrics data from shared memory")
 
-        for metric in custom_metric:
+        for metric in customer_metrics:
             metric_type = metric.get("type", "COUNTER")
 
             tags = self._extract_tags_and_add_method(metric, method)
