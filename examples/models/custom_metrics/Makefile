@@ -1,5 +1,5 @@
-VERSION=0.2
-IMAGE_BASE=seldonio/model-with-metrics
+VERSION=0.3-rc.1
+IMAGE_BASE=zyxue/model-with-metrics
 PYTHON_WRAPPER:= $(shell cat ../../../version.txt)
 
 build:
